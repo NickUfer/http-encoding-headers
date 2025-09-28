@@ -6,7 +6,6 @@ homepage = "https://github.com/NickUfer/http-encoding-headers"
 repository = "https://github.com/NickUfer/http-encoding-headers"
 license = "MIT"
 keywords = ["http", "headers", "accept-encoding", "content-encoding"]
-license-file = "LICENSE"
 readme = "README.md"
 edition = "2024"
 

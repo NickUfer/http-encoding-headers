@@ -2,8 +2,22 @@ use crate::encoding::Encoding;
 use std::cmp::PartialEq;
 use std::str::FromStr;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A wrapper type for content encoding that represents the compression or encoding
+/// scheme used in an HTTP message body. This is used in HTTP's Content-Encoding header.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContentEncoding(Encoding);
+
+impl ContentEncoding {
+    /// Create a new ContentEncoding with the specified encoding
+    pub fn new(encoding: Encoding) -> Self {
+        ContentEncoding(encoding)
+    }
+
+    /// Get the encoding value
+    pub fn encoding(&self) -> &Encoding {
+        &self.0
+    }
+}
 
 #[cfg(feature = "http_crates")]
 impl headers::Header for ContentEncoding {
