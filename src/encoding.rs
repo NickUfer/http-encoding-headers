@@ -15,9 +15,13 @@ const ENC_LZ4: &str = "lz4";
 const ENC_ZLIB: &str = "zlib";
 const ENC_WILDCARD: &str = "*";
 
+/// Quality value type used for encoding preferences
 pub type QualityValue = f32;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Represents supported HTTP content encodings
+///
+/// Used to specify compression and encoding schemes for HTTP message bodies.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Encoding {
     Gzip,
     Deflate,

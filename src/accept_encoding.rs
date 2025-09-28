@@ -3,6 +3,7 @@ use std::fmt::Write;
 use std::str::FromStr;
 use thiserror::Error;
 
+/// Error type for constructing `AcceptEncoding`
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum AcceptEncodingError {
@@ -10,11 +11,15 @@ pub enum AcceptEncodingError {
     EmptyEncodings,
 }
 
+/// Represents an HTTP Accept-Encoding header with a list of supported encodings and their quality values
+#[derive(Clone)]
 pub struct AcceptEncoding {
     encodings: Vec<(Encoding, QualityValue)>,
     sort: Sort,
 }
 
+/// Sort state of encodings list by quality value
+#[derive(Clone)]
 enum Sort {
     Ascending,
     Descending,
@@ -22,6 +27,7 @@ enum Sort {
 }
 
 impl AcceptEncoding {
+    /// Creates a new `AcceptEncoding` from a vector of encodings with their quality values.
     pub fn new(encodings: Vec<(Encoding, QualityValue)>) -> Result<Self, AcceptEncodingError> {
         if encodings.is_empty() {
             return Err(AcceptEncodingError::EmptyEncodings);
@@ -32,23 +38,27 @@ impl AcceptEncoding {
         })
     }
 
+    /// Returns a reference to the internal vector of encodings and their quality values.
     #[inline]
     pub fn items(&self) -> &[(Encoding, QualityValue)] {
         &self.encodings
     }
 
+    /// Sorts the encodings by quality value in descending order and returns self.
     pub fn sort_descending(&mut self) -> &mut Self {
         self.encodings.sort_by(|a, b| b.1.total_cmp(&a.1));
         self.sort = Sort::Descending;
         self
     }
 
+    /// Sorts the encodings by quality value in ascending order and returns self.
     pub fn sort_ascending(&mut self) -> &mut Self {
         self.encodings.sort_by(|a, b| a.1.total_cmp(&b.1));
         self.sort = Sort::Ascending;
         self
     }
 
+    /// Returns the highest-preference encoding.
     pub fn preferred(&self) -> Option<&Encoding> {
         if self.encodings.is_empty() {
             return None;
@@ -64,6 +74,67 @@ impl AcceptEncoding {
                 .unwrap(),
         };
         Some(result)
+    }
+
+    /// Returns the highest-preference encoding that is also present in `allowed`.
+    /// Honors current sorting state (Ascending/Descending/Unsorted) like `preferred`.
+    pub fn preferred_allowed<'a>(
+        &'a self,
+        allowed: impl Iterator<Item = &'a Encoding>,
+    ) -> Option<&'a Encoding> {
+        if self.encodings.is_empty() {
+            return None;
+        }
+
+        // Fast path when already sorted
+        match self.sort {
+            Sort::Descending => {
+                use std::collections::HashSet;
+                let allowed_set: HashSet<&Encoding> = allowed.collect();
+
+                // Search from start until we find an allowed encoding
+                for (enc, q) in &self.encodings {
+                    if *q > 0.0 && allowed_set.contains(enc) {
+                        return Some(enc);
+                    }
+                }
+                None
+            }
+            Sort::Ascending => {
+                use std::collections::HashSet;
+                let allowed_set: HashSet<&Encoding> = allowed.collect();
+
+                // Search from end until we find an allowed encoding
+                for (enc, q) in self.encodings.iter().rev() {
+                    if *q > 0.0 && allowed_set.contains(enc) {
+                        return Some(enc);
+                    }
+                }
+                None
+            }
+            Sort::Unsorted => {
+                // Compute the max by quality among those in `allowed` and with q > 0
+                let mut best: Option<(&Encoding, QualityValue)> = None;
+
+                // To avoid repeatedly iterating allowed, collect once
+                let allowed_vec = allowed.collect::<Vec<_>>();
+
+                for (enc, q) in &self.encodings {
+                    if *q <= 0.0 {
+                        continue;
+                    }
+                    if !allowed_vec.contains(&enc) {
+                        continue;
+                    }
+                    match best {
+                        None => best = Some((enc, *q)),
+                        Some((_, best_q)) if q.total_cmp(&best_q).is_gt() => best = Some((enc, *q)),
+                        _ => {}
+                    }
+                }
+                best.map(|(enc, _)| enc)
+            }
+        }
     }
 }
 
@@ -362,5 +433,126 @@ mod tests {
             encode_header_value(&[]),
             Err(AcceptEncodingEncodeError::EmptyEncodings)
         ));
+    }
+
+    #[test]
+    fn test_preferred_empty() {
+        let encodings = vec![];
+        let enc = AcceptEncoding::new(encodings);
+        assert!(enc.is_err());
+    }
+
+    #[test]
+    fn test_preferred_unsorted() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+
+        assert!(matches!(enc.preferred(), Some(&Encoding::Gzip)));
+    }
+
+    #[test]
+    fn test_preferred_sorted_ascending() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+        enc.sort_ascending();
+
+        assert!(matches!(enc.preferred(), Some(&Encoding::Gzip)));
+    }
+
+    #[test]
+    fn test_preferred_sorted_descending() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+        enc.sort_descending();
+
+        assert!(matches!(enc.preferred(), Some(&Encoding::Gzip)));
+    }
+
+    #[test]
+    fn test_preferred_allowed_unsorted() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+
+        let allowed = vec![Encoding::Deflate, Encoding::Br];
+        assert!(matches!(
+            enc.preferred_allowed(allowed.iter()),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_sorted_descending() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+        enc.sort_descending();
+
+        let allowed = vec![Encoding::Deflate, Encoding::Br];
+        assert!(matches!(
+            enc.preferred_allowed(allowed.iter()),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_sorted_ascending() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+        enc.sort_ascending();
+
+        let allowed = vec![Encoding::Deflate, Encoding::Br];
+        assert!(matches!(
+            enc.preferred_allowed(allowed.iter()),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_quality_zero() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.0),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.0),
+        ])
+        .unwrap();
+
+        let allowed = vec![Encoding::Deflate, Encoding::Br];
+        assert!(matches!(enc.preferred_allowed(allowed.iter()), None));
+    }
+
+    #[test]
+    fn test_preferred_allowed_no_matches() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+
+        let allowed = vec![Encoding::Identity];
+        assert!(matches!(enc.preferred_allowed(allowed.iter()), None));
     }
 }
