@@ -1,5 +1,6 @@
 [package]
 name = "http_encoding_headers"
+description = "A  library for handling HTTP Accept-Encoding and Content-Encoding headers with support for common compression algorithms and custom encodings."
 version = "0.1.0"
 authors = ["Nick Ufer <nick@ufer.dev>"]
 homepage = "https://github.com/NickUfer/http-encoding-headers"
