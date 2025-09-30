@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::encoding::{Encoding, QualityValue};
 use std::fmt::Write;
 use std::str::FromStr;
@@ -82,57 +83,102 @@ impl AcceptEncoding {
         &'a self,
         allowed: impl Iterator<Item = &'a Encoding>,
     ) -> Option<&'a Encoding> {
+        self.preferred_allowed_weighted(allowed.map(|e| (e, 1.0)))
+    }
+
+    /// Returns the highest-preference encoding that is also present in `allowed`,
+    /// taking into account both client preferences and server weights.
+    /// When multiple encodings have the same weight, the one with highest
+    /// allowed weight is chosen.
+    pub fn preferred_allowed_weighted<'a>(
+        &'a self,
+        allowed: impl Iterator<Item=(&'a Encoding, QualityValue)>,
+    ) -> Option<&'a Encoding> {
         if self.encodings.is_empty() {
             return None;
         }
 
+        let allowed_map: HashMap<&Encoding, QualityValue> = allowed.collect();
+
         // Fast path when already sorted
         match self.sort {
             Sort::Descending => {
-                use std::collections::HashSet;
-                let allowed_set: HashSet<&Encoding> = allowed.collect();
-
                 // Search from start until we find an allowed encoding
                 for (enc, q) in &self.encodings {
-                    if *q > 0.0 && allowed_set.contains(enc) {
-                        return Some(enc);
+                    if *q > 0.0 {
+                        if let Some(allowed_q) = allowed_map.get(enc) {
+                            if *allowed_q > 0.0 {
+                                return Some(enc);
+                            }
+                        }
                     }
                 }
                 None
             }
             Sort::Ascending => {
-                use std::collections::HashSet;
-                let allowed_set: HashSet<&Encoding> = allowed.collect();
-
                 // Search from end until we find an allowed encoding
                 for (enc, q) in self.encodings.iter().rev() {
-                    if *q > 0.0 && allowed_set.contains(enc) {
-                        return Some(enc);
+                    if *q > 0.0 {
+                        if let Some(allowed_q) = allowed_map.get(enc) {
+                            if *allowed_q > 0.0 {
+                                return Some(enc);
+                            }
+                        }
                     }
                 }
                 None
             }
             Sort::Unsorted => {
-                // Compute the max by quality among those in `allowed` and with q > 0
-                let mut best: Option<(&Encoding, QualityValue)> = None;
+                // self.encodings has preference order. We only use allowed weights
+                // to break ties among encodings that share the same max client quality.
+                // 1) Find the maximum client quality among encodings that are allowed (>0).
+                // 2) Among self.encodings entries with that client quality, if multiple are allowed,
+                //    pick the one with the highest allowed weight.
 
-                // To avoid repeatedly iterating allowed, collect once
-                let allowed_vec = allowed.collect::<Vec<_>>();
-
-                for (enc, q) in &self.encodings {
-                    if *q <= 0.0 {
+                // Find max client quality among allowed encodings (>0 both sides)
+                let mut max_client_q: Option<QualityValue> = None;
+                for (enc, client_q) in &self.encodings {
+                    if *client_q <= 0.0 {
                         continue;
                     }
-                    if !allowed_vec.contains(&enc) {
-                        continue;
-                    }
-                    match best {
-                        None => best = Some((enc, *q)),
-                        Some((_, best_q)) if q.total_cmp(&best_q).is_gt() => best = Some((enc, *q)),
-                        _ => {}
+                    if let Some(&allowed_q) = allowed_map.get(enc) {
+                        if allowed_q <= 0.0 {
+                            continue;
+                        }
+                        match max_client_q {
+                            None => max_client_q = Some(*client_q),
+                            Some(curr_max) if client_q > &curr_max => max_client_q = Some(*client_q),
+                            _ => {}
+                        }
                     }
                 }
-                best.map(|(enc, _)| enc)
+
+                let Some(target_q) = max_client_q else {
+                    return None;
+                };
+
+                // Among entries with client_q == target_q and allowed (>0), choose the one
+                // with the highest allowed weight. Preserve self.encodings order when allowed
+                // weights tie, thus keeping self.encodings preference.
+                let mut best_enc: Option<&Encoding> = None;
+                let mut best_allowed_q: QualityValue = 0.0;
+
+                for (enc, client_q) in &self.encodings {
+                    if *client_q != target_q {
+                        continue;
+                    }
+                    if let Some(&allowed_q) = allowed_map.get(enc) {
+                        if allowed_q <= 0.0 {
+                            continue;
+                        }
+                        if best_enc.is_none() || allowed_q > best_allowed_q {
+                            best_enc = Some(enc);
+                            best_allowed_q = allowed_q;
+                        }
+                    }
+                }
+
+                best_enc
             }
         }
     }
@@ -554,5 +600,123 @@ mod tests {
 
         let allowed = vec![Encoding::Identity];
         assert!(matches!(enc.preferred_allowed(allowed.iter()), None));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_max_weighted_when_single_allowed_with_max_weight_matches_unsorted() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+        .unwrap();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 0.8)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+
+        let allowed = vec![(Encoding::Deflate, 0.5), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_max_weighted_when_single_allowed_with_max_weight_matches_ascending_sorted() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+            .unwrap();
+        enc.sort_ascending();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 0.8)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+
+        // When server prefers Br with high weight
+        let allowed = vec![(Encoding::Deflate, 0.5), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_max_weighted_when_single_allowed_with_max_weight_matches_descending_sorted() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 0.5),
+            (Encoding::Gzip, 1.0),
+            (Encoding::Deflate, 0.8),
+        ])
+            .unwrap();
+        enc.sort_descending();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 0.8)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+
+        // When server prefers Br with high weight
+        let allowed = vec![(Encoding::Deflate, 0.5), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Deflate)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_allowed_max_weighted_when_multiple_allowed_with_max_weight_matches_unsorted() {
+        let enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 1.0),
+            (Encoding::Gzip, 0.6),
+            (Encoding::Deflate, 0.4),
+        ])
+        .unwrap();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Br)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_allowed_max_weighted_when_multiple_allowed_with_max_weight_matches_ascending_sorted() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 1.0),
+            (Encoding::Gzip, 0.6),
+            (Encoding::Deflate, 0.4),
+        ])
+            .unwrap();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.sort_ascending().preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Br)
+        ));
+    }
+
+    #[test]
+    fn test_preferred_allowed_weighted_select_allowed_max_weighted_when_multiple_allowed_with_max_weight_matches_descending_sorted() {
+        let mut enc = AcceptEncoding::new(vec![
+            (Encoding::Br, 1.0),
+            (Encoding::Gzip, 0.6),
+            (Encoding::Deflate, 0.4),
+        ])
+            .unwrap();
+
+        let allowed = vec![(Encoding::Deflate, 1.0), (Encoding::Br, 1.0)];
+        assert!(matches!(
+            enc.sort_descending().preferred_allowed_weighted(allowed.iter().map(|(e, q)| (e, *q))),
+            Some(&Encoding::Br)
+        ));
     }
 }
